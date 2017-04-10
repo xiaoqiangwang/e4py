@@ -4,6 +4,16 @@ import ipaddress
 import enum
 import socketserver
 import threading
+import netifaces
+
+
+class Networks(object):
+    @staticmethod
+    def broadcast_list():
+        addresses = []
+        for iface in netifaces.interfaces():
+            addresses.append(netifaces.ifaddresses(iface)[netifaces.AF_INET]['broadcast'])
+        return addresses
 
 
 def popout(buffer, size):
@@ -454,9 +464,9 @@ def run_client():
         tid = threading.Thread(target=run_socket_client, args=(response.serverAddress.compressed, response.serverPort))
         tid.start()
  
-
-import sys
-if sys.argv[1] == 'client':
-    run_client()
-else:
-    run_server()
+if __name__ == '__main__':
+    import sys
+    if sys.argv[1] == 'client':
+        run_client()
+    else:
+        run_server()
