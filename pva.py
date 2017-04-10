@@ -2,18 +2,7 @@ import socket
 import struct
 import ipaddress
 import enum
-import socketserver
 import threading
-import netifaces
-
-
-class Networks(object):
-    @staticmethod
-    def broadcast_list():
-        addresses = []
-        for iface in netifaces.interfaces():
-            addresses.append(netifaces.ifaddresses(iface)[netifaces.AF_INET]['broadcast'])
-        return addresses
 
 
 def popout(buffer, size):
