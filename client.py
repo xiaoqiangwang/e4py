@@ -1,45 +1,18 @@
 import socket
+import threading
 
 from messages import *
 
 def run_socket_client(addr, port):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
     sock.connect((addr, port))
-    data = bytearray()
-    chunk = sock.recv(1024)
-    data.extend(chunk)
 
-    header = MessageHeader.from_buffer(data)
-    if header.flags.type_ == MessageType.Control and header.messageCommand == ControlMessageCode.ByteOrder:
-        endianess = header.flags.endianess
-
-    header = MessageHeader.from_buffer(data)
-    if header.messageCommand == ApplicationMessageCode.ConnectionValidation:
-        validation = ConnectionValidationRequest.from_buffer(data)
-        print(validation)
-        response = ConnectionValidationResponse(0x4400, 0x7fff, 0, b'')
-        messageBody = response.to_buffer()
-        messageHeader = MessageHeader(messageCommand=ApplicationMessageCode.ConnectionValidation, payloadSize=len(messageBody))
-        sock.send(messageHeader.to_buffer() + messageBody)
-
-    chunk = sock.recv(1024)
-    data.extend(chunk)
-    header = MessageHeader.from_buffer(data)
-    if header.messageCommand == ApplicationMessageCode.ConnectionValidated:
-        status = Status.from_buffer(data)
-
-    request = CreateChannelRequest([(1, b'testMP')])
-    messageBody = request.to_buffer()
-    messageHeader = MessageHeader(messageCommand=ApplicationMessageCode.CreateChannel, payloadSize=len(messageBody))
-    sock.send(messageHeader.to_buffer() + messageBody)
-
-    chunk = sock.recv(1024)
-    data.extend(chunk)
-    header = MessageHeader.from_buffer(data)
-    if header.messageCommand == ApplicationMessageCode.CreateChannel:
-        response = CreateChannelResponse.from_buffer(data)
-        print(response)
-
+    dispatcher = ClientMessageDispatcher(sock)
+    while True:
+        chunk = sock.recv(1024)
+        status = dispatcher.data_received(chunk)
+        if status == 0:
+            break
     sock.close()
 
 def run_client():
@@ -48,22 +21,21 @@ def run_client():
     if hasattr(socket, 'SO_REUSEPORT'):
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
 
-    sock.bind((UDP_ADDR, 50001))
+    sock.bind(('0.0.0.0', 50001))
 
-    search = SearchRequest(1, 0, '::ffff:0:0', 50001, [b'tcp'])
-    search.channels = [(1, b'testMP')]
-    print(search)
-    messageBody = search.to_buffer()
-    messageHeader = MessageHeader(messageCommand=ApplicationMessageCode.SearchRequest, payloadSize=len(messageBody))
-    message = messageHeader.to_buffer() + messageBody
-    sock.sendto(message, ('192.168.1.255', 5076))
+    search = SearchRequest(1, 0, u'::ffff:0:0', 50001, [b'tcp'], [(1, b'testMP')])
+    sock.sendto(search.to_buffer(), ('192.168.1.255', 5076))
 
     chunk, addr = sock.recvfrom(1024)
-    data.extend(chunk)
-    header = MessageHeader.from_buffer(data)
+    buffer = BufferReader(chunk)
+    header = MessageHeader.from_buffer(buffer)
+    print(header)
     if header.messageCommand == ApplicationMessageCode.SearchResponse:
-        response = SearchResponse.from_buffer(data)
+        response = SearchResponse.from_buffer(buffer)
         print(response)
         tid = threading.Thread(target=run_socket_client, args=(response.serverAddress.compressed, response.serverPort))
         tid.start()
 
+
+if __name__ == '__main__':
+    run_client()

@@ -23,9 +23,14 @@ else:
     int_from_bytes = int.from_bytes
     int_to_bytes = int.to_bytes
 
-__all__ =['BeaconMessage', 'SearchRequest', 'SearchResponse', 'ConnectionValidationRequest', 'ConnectionValidationResponse',
-          'ConnectionValidatedResponse', 'CreateChannelRequest', 'CreateChannelResponse',
-          'ChannelGetRequestInit']
+
+__all__ =['MessageHeader', 'BeaconMessage', 'SearchRequest', 'SearchResponse', 'ConnectionValidationRequest',
+          'ConnectionValidationResponse', 'ConnectionValidatedResponse',
+          'CreateChannelRequest', 'CreateChannelResponse',
+          'ChannelGetRequestInit', 'ChannelGetResponseInit',
+          'ApplicationMessageCode',
+          'BufferReader', 'ClientMessageDispatcher', 'ServerMessageDispatcher']
+
 
 class BufferWriter(object):
     """
@@ -54,9 +59,9 @@ class BufferWriter(object):
         self.buffer.extend(struct.pack('I', value))
 
     def put_integer_array(self, value):
-        size = len(value)
-        self._put_size(size)
-        self.buffer.extend(struct.pack('%dI' %(len(value)), value))
+        self._put_size(len(value))
+        for v in value:
+            self.put_integer(v)
 
     def put_string(self, value):
         self._put_size(len(value))
@@ -77,6 +82,9 @@ class BufferWriter(object):
             self.buffer.append(255)
             self.buffer.extend(struct.pack('I', 0x7fffffff))
             self.buffer.extend(struct.pack('Q', size))
+
+    def __len__(self):
+        return len(self.buffer)
 
 
 class BufferReader(object):
@@ -100,7 +108,7 @@ class BufferReader(object):
         :param n: number of bytes to read
         :return:
         """
-        v = self.source[self.index, self.index + n]
+        v = self.source[self.index:self.index + n]
         self.index += n
         return v
 
@@ -110,23 +118,29 @@ class BufferReader(object):
         return v
 
     def get_short(self):
-        v = struct.unpack('H', self.source[self.index, self.index + 2])[0]
+        v = struct.unpack('H', self.source[self.index:self.index + 2])[0]
         self.index += 2
         return v
 
     def get_integer(self):
-        v = struct.unpack('I', self.source[self.index, self.index + 4])[0]
+        v = struct.unpack('I', self.source[self.index:self.index + 4])[0]
         self.index += 4
         return v
 
+    def get_integer_array(self):
+        size = self._get_size()
+        v = struct.unpack('%dI'%size, self.source[self.index:self.index + 4*size])
+        self.index += size*4
+        return v
+
     def get_long(self):
-        v = struct.unpack('Q', self.source[self.index, self.index + 8])[0]
+        v = struct.unpack('Q', self.source[self.index:self.index + 8])[0]
         self.index += 8
         return v
 
     def get_string(self):
         size = self._get_size()
-        v = self.source[self.index, self.index + size]
+        v = self.source[self.index:self.index + size]
         self.index += size
         return v
 
@@ -144,6 +158,9 @@ class BufferReader(object):
             if size == 2 ** 31 - 1:
                 size = self.get_long()
         return size
+
+    def __len__(self):
+        return len(self.source) - self.index
 
 
 class StatusType(enum.IntEnum):
@@ -216,11 +233,18 @@ class ControlMessageCode(enum.IntEnum):
 
 
 class HeaderFlag(object):
-    def __init__(self, flag=0):
-        self.type_ = MessageType(flag & 0x01)
-        self.segment = MessageSegment((flag & 0x30) >> 4)
-        self.direction = MessageDirection((flag & 0x40) >> 6)
-        self.endianess = MessageEndianess((flag & 0x80) >> 7)
+    def __init__(self, *args, **kws):
+        if len(args) == 1:
+            flag = args[0]
+            self.type_ = MessageType(flag & 0x01)
+            self.segment = MessageSegment((flag & 0x30) >> 4)
+            self.direction = MessageDirection((flag & 0x40) >> 6)
+            self.endianess = MessageEndianess((flag & 0x80) >> 7)
+        else:
+            self.type_ = kws.get('type', MessageType.Application)
+            self.segment = kws.get('segment', MessageSegment.No)
+            self.direction = kws.get('direction', MessageDirection.Client)
+            self.endianess = kws.get('endianess', MessageEndianess.Little)
 
     def __int__(self):
         return self.type_ | (self.segment << 4) | (self.direction << 6) | (self.endianess << 7)
@@ -249,7 +273,7 @@ class Status(object):
 
     @staticmethod
     def from_buffer(buffer):
-        type_ = buffer.get_byte()
+        type_ = StatusType(buffer.get_byte())
         message = b''
         callTree = b''
         if type_ != StatusType.DEFAULT:
@@ -302,6 +326,12 @@ class MessageHeader(object):
     @staticmethod
     def from_buffer(buffer):
         magic, version, flags, messageCommand, payloadSize = struct.unpack('BBBBI', buffer.get_raw(8))
+        flags = HeaderFlag(flags)
+        if flags.type_ == MessageType.Application:
+            messageCommand = ApplicationMessageCode(messageCommand)
+        else:
+            messageCommand = ApplicationMessageCode(messageCommand)
+
         return MessageHeader(magic, version, flags, messageCommand, payloadSize)
 
     def to_buffer(self):
@@ -313,9 +343,9 @@ class MessageHeader(object):
             '  magic:          %x\n'\
             '  version:        %d\n'\
             '  flags:          %s\n'\
-            '  messageCommand: %x\n'\
+            '  messageCommand: %s\n'\
             '  payloadSize:    %d\n' % \
-            (self.magic, self.version, self.flags, self.messageCommand, self.payloadSize)
+            (self.magic, self.version, str(self.flags), self.messageCommand, self.payloadSize)
 
 
 class BeaconMessage(object):
@@ -359,7 +389,6 @@ class BeaconMessage(object):
             (self.guid, self.flags, self.sequenceId, self.changeCount, self.serverAddress, self.serverPort, self.protocol)
 
 
-
 class SearchRequest(object):
     def __init__(self, *args):
         self.sequenceId, self.flags, self.responseAddress, self.responsePort, self.protocols, self.channels = args
@@ -376,7 +405,7 @@ class SearchRequest(object):
 
         flags = buffer.get_byte()
         buffer.skip_bytes(3)
-        responseAddress  = ipaddress.IPv6Address(buffer.get_raw(16))
+        responseAddress = ipaddress.IPv6Address(buffer.get_raw(16))
         responsePort = buffer.get_short()
         protocols = buffer.get_string_array()
         size = buffer.get_short()
@@ -389,6 +418,11 @@ class SearchRequest(object):
         return request
         
     def to_buffer(self):
+        header = MessageHeader(
+            flags=HeaderFlag(),
+            messageCommand=ApplicationMessageCode.SearchRequest
+        )
+
         buffer = BufferWriter()
         buffer.put_integer(self.sequenceId)
         buffer.put_byte(self.flags)
@@ -402,15 +436,17 @@ class SearchRequest(object):
             buffer.put_integer(instanceId)
             buffer.put_string(name)
 
-        return buffer.get_buffer()
+        header.payloadSize = len(buffer)
+
+        return header.to_buffer() + buffer.get_buffer()
 
     def __str__(self):
         output = \
             'SearchRequest\n'\
             '  sequenceId:    %d\n'\
             '  flags:         %x\n'\
-            '  serverAddress: %s\n'\
-            '  serverPort:    %d\n'\
+            '  responseAddress: %s\n'\
+            '  responsePort:    %d\n'\
             '  protocols:     %s\n' % \
             (self.sequenceId, self.flags, self.responseAddress, self.responsePort, self.protocols)
         if len(self.channels) > 0:
@@ -443,13 +479,16 @@ class SearchResponse(object):
         serverPort = buffer.get_short()
         protocol = buffer.get_string()
         found = buffer.get_short() != 0
-        instanceIds = []
-        for i in range(buffer.get_short()):
-            instanceIds.append(buffer.get_integer())
+        instanceIds = buffer.get_integer_array()
 
         return SearchResponse(guid, sequenceId, serverAddress, serverPort, protocol, found, instanceIds)
 
     def to_buffer(self):
+        header = MessageHeader(
+            flags=HeaderFlag(direction=MessageDirection.Server),
+            messageCommand=ApplicationMessageCode.SearchResponse
+        )
+
         buffer = BufferWriter()
         buffer.put_raw(int_to_bytes(self.guid, 12, 'little'))
         buffer.put_integer(self.sequenceId)
@@ -457,11 +496,11 @@ class SearchResponse(object):
         buffer.put_short(self.serverPort)
         buffer.put_string(self.protocol)
         buffer.put_short(self.found)
-        buffer.put_short(len(self.instanceIds))
-        for id_ in self.instanceIds:
-            buffer.put_integer(id_)
+        buffer.put_integer_array(self.instanceIds)
 
-        return self.instanceIds
+        header.payloadSize = len(buffer)
+        print(header)
+        return header.to_buffer() + buffer.get_buffer()
 
     def __str__(self):
         output = \
@@ -482,7 +521,6 @@ class SearchResponse(object):
 
 
 class ConnectionValidationRequest(object):
-   
     def __init__(self, *args):
         self.serverReceiverBufferSize, self.serverIntrospectionRegistryMaxSize, self.authNZ = args
 
@@ -500,11 +538,18 @@ class ConnectionValidationRequest(object):
         return ConnectionValidationRequest(serverReceiverBufferSize, serverIntrospectionRegistryMaxSize, authNZ)
 
     def to_buffer(self):
+        header = MessageHeader(
+            flags=HeaderFlag(direction=MessageDirection.Server),
+            messageCommand=ApplicationMessageCode.ConnectionValidation
+        )
+
         buffer = BufferWriter()
         buffer.put_integer(self.serverReceiverBufferSize)
         buffer.put_short(self.serverIntrospectionRegistryMaxSize)
         buffer.put_string_array(self.authNZ)
-        return buffer.get_buffer()
+
+        header.payloadSize = len(buffer)
+        return header.to_buffer() + buffer.get_buffer()
 
     def __str__(self):
         output = \
@@ -540,29 +585,98 @@ class ConnectionValidationResponse(object):
         return ConnectionValidationResponse(clientReceiveBufferSize, clientIntrospectionRegistryMaxSize, connectionQos, authNZ)
 
     def to_buffer(self):
+        header = MessageHeader(
+            messageCommand=ApplicationMessageCode.ConnectionValidation
+        )
         buffer = BufferWriter()
         buffer.put_integer(self.clientReceiveBufferSize)
         buffer.put_short(self.clientIntrospectionRegistryMaxSize)
-        buffer.put_short(struct.pack('H', self.connectionQos))
+        buffer.put_short(self.connectionQos)
         buffer.put_string(self.authNZ)
 
-        return buffer.get_buffer()
+        header.payloadSize = len(buffer)
+        return header.to_buffer() + buffer.get_buffer()
+
+    def __str__(self):
+        return \
+            'ConnectionValidationResponse\n'\
+            '  clientReceiveBufferSize:            %d\n'\
+            '  clientIntrospectionRegistryMaxSize: %d\n'\
+            '  connectionQos:                      %d\n'\
+            '  authNZ:                             %s\n'\
+            % (self.clientReceiveBufferSize, self.clientIntrospectionRegistryMaxSize, self.connectionQos, self.authNZ)
+
+
+class ConnectionValidatedResponse(object):
+    def __init__(self, status=Status()):
+        self.status = status
+
+    @staticmethod
+    def from_buffer(buffer):
+        """
+        Create ConnectionValidatedResponse from *buffer*
+
+        :param :class:`BufferReader` buffer:
+        :return: :class:`ConnectionValidatedResponse` instance
+        """
+        status = Status.from_buffer(buffer)
+        return ConnectionValidatedResponse(status)
+
+    def to_buffer(self):
+        header = MessageHeader(
+            flags=HeaderFlag(direction=MessageDirection.Server),
+            messageCommand=ApplicationMessageCode.ConnectionValidated,
+            payloadSize=1
+        )
+        return header.to_buffer() + self.status.to_buffer()
+
+    def __str__(self):
+        return \
+            'ConnectionValidatedResponse\n' \
+            '  status: %s\n' % self.status
 
 
 class CreateChannelRequest(object):
     def __init__(self, channels):
         self.channels = channels
 
+    @staticmethod
+    def from_buffer(buffer):
+        """
+        Create CreateChannelRequest from *buffer*
+
+        :param :class:`BufferReader` buffer:
+        :return: :class:`CreateChannelRequest` instance
+        """
+        channels = []
+        for i in range(buffer.get_short()):
+            id_ = buffer.get_integer()
+            name = buffer.get_string()
+            channels.append((id_, name))
+
+        return CreateChannelRequest(channels)
+
     def to_buffer(self):
+        header = MessageHeader(
+            messageCommand=ApplicationMessageCode.CreateChannel
+        )
+
         buffer = BufferWriter()
         buffer.put_short(len(self.channels))
 
         for id_, name in self.channels:
             buffer.put_integer(id_)
             buffer.put_string(name)
-    
-        return buffer.get_buffer()
 
+        header.payloadSize = len(buffer)
+        return header.to_buffer() + buffer.get_buffer()
+
+    def __str__(self):
+        output = 'CreateChannelRequest\n'
+        for id_, name in self.channels:
+            output += '  %d %s\n' % (id_, name)
+
+        return output
 
 class CreateChannelResponse(object):
     def __init__(self, *args):
@@ -585,6 +699,21 @@ class CreateChannelResponse(object):
         
         return CreateChannelResponse(clientChannelID, serverChannelID, status, accessRights)
 
+    def to_buffer(self):
+        header = MessageHeader(
+            flags=HeaderFlag(direction=MessageDirection.Server),
+            messageCommand=ApplicationMessageCode.CreateChannel
+        )
+        buffer = BufferWriter()
+        buffer.put_integer(self.clientChannelID)
+        buffer.put_integer(self.serverChannelID)
+        buffer.put_raw(self.status.to_buffer())
+        if self.status.type_ == StatusType.OK or self.status.type_ == StatusType.WARNING:
+            buffer.put_short(self.accessRights)
+
+        header.payloadSize = len(buffer)
+        return header.to_buffer() + buffer.get_buffer()
+
     def __str__(self):
         return \
             'CreateChannelResponse\n'\
@@ -599,5 +728,206 @@ class ChannelGetRequestInit(object):
         self.serverChannelID, self.requestID = args
         self.subcommand = 0x08
 
+
+    @staticmethod
+    def from_buffer(buffer):
+        """
+        Create ChannelGetRequestInit from *buffer*
+
+        :param :class:`BufferReader` buffer:
+        :return: :class:`ChannelGetRequestInit` instance
+        """
+        serverChannelID = buffer.get_integer()
+        requestID = buffer.get_integer()
+        subcommand = buffer.get_byte()
+
+
     def to_buffer(self):
         pass
+
+
+class ChannelGetResponseInit(object):
+    def __init__(self, *args):
+        self.requestID, self.subcommand, self.status = args
+
+    @staticmethod
+    def from_buffer(buffer):
+        """
+        Create ChannelGetRequestInit from *buffer*
+
+        :param :class:`BufferReader` buffer:
+        :return: :class:`ChannelGetRequestInit` instance
+        """
+        requestID = buffer.get_integer()
+        subcommand = buffer.get_byte()
+        status = Status.from_buffer(buffer)
+
+        return ChannelGetResponseInit(requestID, subcommand, status)
+
+    def to_buffer(self):
+        pass
+
+
+class ChannelGetFieldRequest(object):
+    def __init__(self, *args):
+        self.serverChannelID, self.requestID, self.subFieldName = args
+
+    @staticmethod
+    def from_buffer(buffer):
+        """
+        Create ChannelGetFieldRequest from *buffer*
+
+        :param :class:`BufferReader` buffer:
+        :return: :class:`ChannelGetFieldRequest` instance
+        """
+        serverChannelID = buffer.get_integer()
+        requestID = buffer.get_integer()
+        subFieldName = buffer.get_string()
+
+        return ChannelGetResponseInit(serverChannelID, requestID, subFieldName)
+
+    def to_buffer(self):
+        header = MessageHeader(
+            flags=HeaderFlag(direction=MessageDirection.Server),
+            messageCommand=ApplicationMessageCode.ChannelIF
+        )
+        buffer = BufferWriter()
+        buffer.put_integer(self.serverChannelID)
+        buffer.put_integer(self.requestID)
+        buffer.put_string(self.subFieldName)
+
+        header.payloadSize = len(buffer)
+        return header.to_buffer() + buffer.get_buffer()
+
+    def __str__(self):
+        return \
+            'ChannelGetFieldRequest\n'\
+            '  serverChannelID:  %d\n'\
+            '  requestID:        %d\n'\
+            '  subFieldName:     %s\n' \
+            % (self.serverChannelID, self.requestID, self.subFieldName)
+
+
+class ChannelGetFieldResponse(object):
+    def __init__(self, *args):
+        self.requestID, self.status, self.subFieldIF = args
+
+    @staticmethod
+    def from_buffer(buffer):
+        """
+        Create ChannelGetFieldResponse from *buffer*
+
+        :param :class:`BufferReader` buffer:
+        :return: :class:`ChannelGetFieldResponse` instance
+        """
+        requestID = buffer.get_integer()
+        status = Status.from_buffer(buffer)
+
+        return ChannelGetFieldResponse(requestID, status, None)
+
+
+    def __str__(self):
+        return \
+            'ChannelGetFieldResponse\n'\
+            '  requestID:  %d\n'\
+            '  status:     %s\n'\
+            % (self.requestID, self.status)
+
+
+class ClientMessageDispatcher(object):
+
+    def __init__(self, tranport):
+        self.transport = tranport
+        self.pending = False
+
+    def data_received(self, data):
+        buffer = BufferReader(data)
+
+        while len(buffer) > 0:
+            if len(buffer) < constants.PVA_MESSAGE_HEADER_SIZE:
+                return -1
+
+            header = MessageHeader.from_buffer(buffer)
+            print(header)
+
+            if len(buffer) < header.payloadSize:
+                return -1
+
+            if header.messageCommand == ApplicationMessageCode.ConnectionValidation:
+                request = ConnectionValidationRequest.from_buffer(buffer)
+                print(request)
+
+                response = ConnectionValidationResponse(request.serverReceiverBufferSize,
+                                                        request.serverIntrospectionRegistryMaxSize,
+                                                        0,
+                                                        b'')
+                self.send_data(response.to_buffer())
+                self.pending = True
+            elif header.messageCommand == ApplicationMessageCode.ConnectionValidated:
+                response = ConnectionValidatedResponse.from_buffer(buffer)
+                print(response)
+
+                request = CreateChannelRequest([(1, b'testMP')])
+                self.send_data(request.to_buffer())
+                self.pending = True
+            elif header.messageCommand == ApplicationMessageCode.CreateChannel:
+                response = CreateChannelResponse.from_buffer(buffer)
+                print(response)
+
+                request = ChannelGetFieldRequest(response.serverChannelID, 1, b'')
+                self.send_data(request.to_buffer())
+                self.pending = True
+            elif header.messageCommand == ApplicationMessageCode.ChannelIF:
+                response = ChannelGetFieldResponse.from_buffer(buffer)
+                print(response)
+                fieldDesc = buffer.get_raw(header.payloadSize - 5)
+                print(fieldDesc)
+                print(fieldDesc.encode('hex'))
+                self.pending = False
+            else:
+                buffer.skip_bytes(header.payloadSize)
+
+        return self.pending
+
+    def send_data(self, data):
+        self.transport.send(data)
+
+
+class ServerMessageDispatcher(object):
+
+    def __init__(self, transport):
+        self.transport = transport
+        self.pending = False
+
+    def data_received(self, data):
+        buffer = BufferReader(data)
+
+        while len(buffer) > 0:
+            if len(buffer) < constants.PVA_MESSAGE_HEADER_SIZE:
+                return -1
+
+            header = MessageHeader.from_buffer(buffer)
+            print(header)
+
+            if len(buffer) < header.payloadSize:
+                return -1
+
+            if header.messageCommand == ApplicationMessageCode.ConnectionValidation:
+                response = ConnectionValidationResponse.from_buffer(buffer)
+                print(response)
+
+                response = ConnectionValidatedResponse()
+                self.send_data(response.to_buffer())
+                self.pending = True
+            elif header.messageCommand == ApplicationMessageCode.CreateChannel:
+                request = CreateChannelRequest.from_buffer(buffer)
+                print(request)
+
+                for id_, name in request.channels:
+                    response = CreateChannelResponse(id_, id_, Status(), 0)
+                    self.send_data(response.to_buffer())
+            else:
+                buffer.skip_bytes(header.payloadSize)
+
+    def send_data(self, data):
+        self.transport.send(data)
