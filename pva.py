@@ -260,7 +260,7 @@ class ConnectionValidationRequest(object):
             (self.serverReceiverBufferSize, self.serverIntrospectionRegistryMaxSize)
         if len(self.authNZ) > 0:
             output += '  authNZ: '
-            for auth in authNZ:
+            for auth in self.authNZ:
                 output += auth.decode()
         return output
 
