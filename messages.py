@@ -113,7 +113,9 @@ class BufferReader(object):
         return v
 
     def get_byte(self):
-        v = ord(self.source[self.index])
+        v = self.source[self.index]
+        if sys.hexversion < 0x03000000:
+            v = ord(v)
         self.index += 1
         return v
 
