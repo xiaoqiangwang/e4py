@@ -6,6 +6,7 @@ import enum
 import sys
 
 import constants
+from data import DataObject, DataFlag
 
 if sys.hexversion < 0x03000000:
     def int_from_bytes(s, byteorder):
@@ -786,7 +787,7 @@ class ChannelGetFieldRequest(object):
         requestID = buffer.get_integer()
         subFieldName = buffer.get_string()
 
-        return ChannelGetResponseInit(serverChannelID, requestID, subFieldName)
+        return ChannelGetFieldRequest(serverChannelID, requestID, subFieldName)
 
     def to_buffer(self):
         header = MessageHeader(
@@ -824,16 +825,25 @@ class ChannelGetFieldResponse(object):
         """
         requestID = buffer.get_integer()
         status = Status.from_buffer(buffer)
+        object_ = None
+        if status.type_ == StatusType.OK or status.type_ == StatusType.DEFAULT or status.type_ == StatusType.WARNING:
+            object_ = DataObject.from_buffer(buffer)
+        return ChannelGetFieldResponse(requestID, status, object_)
 
-        return ChannelGetFieldResponse(requestID, status, None)
-
+    def to_buffer(self):
+        buffer = BufferWriter()
+        buffer.put_integer(self.requestID)
+        buffer.put_raw(self.status.to_buffer())
+        buffer.put_raw(self.subFieldIF.to_buffer())
+        return buffer.get_buffer()
 
     def __str__(self):
         return \
             'ChannelGetFieldResponse\n'\
             '  requestID:  %d\n'\
             '  status:     %s\n'\
-            % (self.requestID, self.status)
+            '  subFieldIF: %s\n'\
+            % (self.requestID, self.status, self.subFieldIF)
 
 
 class ClientMessageDispatcher(object):
@@ -876,15 +886,17 @@ class ClientMessageDispatcher(object):
                 response = CreateChannelResponse.from_buffer(buffer)
                 print(response)
 
-                request = ChannelGetFieldRequest(response.serverChannelID, 1, b'')
+                request = ChannelGetFieldRequest(response.serverChannelID, 1, b'dimension')
                 self.send_data(request.to_buffer())
                 self.pending = True
             elif header.messageCommand == ApplicationMessageCode.ChannelIF:
                 response = ChannelGetFieldResponse.from_buffer(buffer)
                 print(response)
-                fieldDesc = buffer.get_raw(header.payloadSize - 5)
-                print(fieldDesc)
-                print(fieldDesc.encode('hex'))
+                #fieldDesc = buffer.get_raw(header.payloadSize - 5)
+                #object_ = DataObject.from_buffer(BufferReader(fieldDesc))
+                #print(object_)
+                #print(fieldDesc)
+                #print(fieldDesc.encode('hex'))
                 self.pending = False
             else:
                 buffer.skip_bytes(header.payloadSize)
@@ -928,6 +940,9 @@ class ServerMessageDispatcher(object):
                 for id_, name in request.channels:
                     response = CreateChannelResponse(id_, id_, Status(), 0)
                     self.send_data(response.to_buffer())
+            elif header.messageCommand == ApplicationMessageCode.ChannelIF:
+                request = ChannelGetFieldRequest.from_buffer(buffer)
+                print(request)
             else:
                 buffer.skip_bytes(header.payloadSize)
 
