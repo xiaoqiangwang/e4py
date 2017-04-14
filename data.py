@@ -1,5 +1,7 @@
+from __future__ import print_function
 import enum
-from messages import BufferReader
+import pprint
+
 
 class ArrayFlag(enum.IntEnum):
     Scalar = 0x00
@@ -9,7 +11,7 @@ class ArrayFlag(enum.IntEnum):
 
 
 class DataFlag(enum.IntEnum):
-    # boolean
+    # Boolean
     Boolean = 0
     # Integer
     Byte = 1
@@ -44,7 +46,7 @@ class DataRegistry(object):
         self.registry = {}
 
     def register_type(self, id_, object_):
-        self.registry[id_] = object
+        self.registry[id_] = object_
 
     def get_type(self, id_):
         return self.registry[id_]
@@ -54,10 +56,43 @@ registry = DataRegistry()
 
 
 class DataType(object):
-    fields = []
 
-    def __init(self, id_, type_code, ):
-        self.id_ = id_
+    def __init__(self, *args):
+        self.type_code, self.array_flag = args
+
+    def __str__(self):
+        return '%s %s' % (self.type_code, self.array_flag)
+
+    def to_field_desc(self):
+        array_bits = self.array_flag << 3
+        subtype_bits = 0
+        if self.type_code == DataFlag.Boolean:
+            major_bits = 0b000
+
+        elif self.type_code <= DataFlag.ULong and self.type_code >= DataFlag.Byte:
+            major_bits = 0b001
+            if (self.type_code - DataFlag.Byte) % 2 == 0:
+                subtype_bits = (self.type_code - DataFlag.Byte) / 2
+            elif (self.type_code - DataFlag.UByte) % 2 == 0:
+                subtype_bits = (self.type_code - DataFlag.UByte) / 2
+                subtype_bits |= 0b100
+
+        elif self.type_code == DataFlag.Float:
+            major_bits = 0b010
+            subtype_bits = 0b010
+
+        elif self.type_code == DataFlag.Double:
+            major_bits = 0b010
+            subtype_bits = 0b011
+
+        elif self.type_code == DataFlag.String:
+            major_bits = 0b011
+
+        else:
+            major_bits = 0b100
+            subtype_bits = self.type_code - DataFlag.Structure
+
+        return major_bits << 5 | array_bits | subtype_bits
 
     @staticmethod
     def from_field_desc(field_desc):
@@ -87,12 +122,13 @@ class DataType(object):
         elif major_code == 0b100:
             type_code = DataFlag(DataFlag.Structure + subtype_code)
 
-        return type_code, array_flag
+        return DataType(type_code, array_flag)
 
 
 class DataObject(object):
     def __init__(self, *args):
-        self.id_, self.name, self.fields = args
+        self.id_,  self.type_, self.size, self.fields = args
+        self.name = b''
 
     @staticmethod
     def from_buffer(buffer):
@@ -102,51 +138,59 @@ class DataObject(object):
         elif field_enc == FieldEncoding.Only_ID:
             id_ = buffer.get_short()
             return registry.get_type(id_)
-        elif field_enc == FieldEncoding.Full_ID:
+        elif field_enc == FieldEncoding.Full_ID or field_enc == FieldEncoding.Full_Tagged_ID:
             id_ = buffer.get_short()
-            type_code, array_flag = DataType.from_field_desc(buffer.get_byte())
-            name = buffer.get_string()
-            if type_code == DataFlag.Structure:
-                size = buffer._get_size()
-                fields = []
-                for i in range(size):
+            tag = b''
+            if field_enc == FieldEncoding.Full_Tagged_ID:
+                tag = buffer.get_string()
+            data_type = DataType.from_field_desc(buffer.get_byte())
+            if data_type.type_code == DataFlag.Structure or data_type.type_code == DataFlag.Union:
+                if data_type.array_flag == ArrayFlag.Scalar:
+                    name_ = buffer.get_string()
+                    size = buffer._get_size()
+                    fields = []
+                    for i in range(size):
+                        name = buffer.get_string()
+                        object_ = DataObject.from_buffer(buffer)
+                        object_.name = name
+                        fields.append(object_)
+                    object_ = DataObject(id_, data_type.type_code, size, fields)
+                    object_.name = name_
+                    registry.register_type(id_, object_)
+                    return object_
+                else:
                     object_ = DataObject.from_buffer(buffer)
-                    fields.append((name, object_))
-                return DataObject(id_, name, fields)
-            elif type_code == DataFlag.Union:
-                pass
-            elif type_code == DataFlag.VariantUnion:
-                pass
-            elif type_code == DataFlag.BoundedString:
-                pass
-            else:
+                    return object_
+            elif data_type.type_code == DataFlag.VariantUnion:
+                object_ = DataObject(id_, data_type.type_code, 0, [])
+                registry.register_type(id_, object_)
+                return object_
+            elif data_type.type_code == DataFlag.BoundedString:
                 name = buffer.get_string()
-                type_code, array_flag = DataType.from_field_desc(buffer.get_byte())
-                print(name, type_code, array_flag)
-                return DataObject(field_enc, name, [])
-
-        elif field_enc == FieldEncoding.Full_Tagged_ID:
-            pass
-        else:
-            buffer.index -= 1
-            name = buffer.get_string()
-            type_code, array_flag = DataType.from_field_desc(buffer.get_byte())
-            size = 0
-            if array_flag == ArrayFlag.FixedSizeArray or array_flag == ArrayFlag.BoundSizeArray:
                 size = buffer._get_size()
-            return DataObject(field_enc, name, [])
+                object_ = DataObject(id_, data_type.type_code, size, [])
+                object_.name = name
+                registry.register_type(id_, object_)
+                return object_
+        else:
+            data_type = DataType.from_field_desc(field_enc)
+            size = 0
+            if data_type.array_flag == ArrayFlag.FixedSizeArray or data_type.array_flag == ArrayFlag.BoundSizeArray:
+                size = buffer._get_size()
+            return DataObject(field_enc, data_type.array_flag, size, [])
 
-        return
 
     def __str__(self):
-        for name, object_ in self.fields:
-            print(name)
-            if object_ is not None:
-                print(object_)
+        output = '%d %s %s %d' % (self.id_, self.name, self.type_, self.size)
+        for object_ in self.fields:
+            output += '\n  %s' % (object_)
+        return output
 
 if __name__ == '__main__':
     import codecs
+    import hexdump
     import sys
+    from messages import BufferReader
 
     desc = \
     b"FD 00 01 80  0B 74 69 6D  65 53 74 61  6D 70 5F 74 03 10 73 65  63 6F 6E 64  73 50 61 73  74 45 70 6F"\
@@ -170,12 +214,36 @@ if __name__ == '__main__':
     b'65 43 0C 76  61 72 69 61  6E 74 55 6E  69 6F 6E FD'\
     b'00 05 82'
 
-    if len(sys.argv) == 1:
-        print(DataObject.from_buffer(BufferReader(codecs.decode(desc.replace(b' ', b''), 'hex'))))
+    desc = b'fd0100801665706963733a6e742f4e544e4441727261793a312e30080576616c7'\
+           b'565fd020081000b0c626f6f6c65616e56616c756508096279746556616c756528'\
+           b'0a73686f727456616c75652908696e7456616c75652a096c6f6e6756616c75652'\
+           b'b0a756279746556616c75652c0b7573686f727456616c75652d0975696e745661'\
+           b'6c75652e0a756c6f6e6756616c75652f0a666c6f617456616c75654a0b646f756'\
+           b'26c6556616c75654b05636f646563fd03008007636f6465635f7402046e616d65'\
+           b'600a706172616d6574657273fd0400820e636f6d7072657373656453697a65231'\
+           b'0756e636f6d7072657373656453697a65230964696d656e73696f6efd050088fd'\
+           b'0600800b64696d656e73696f6e5f74050473697a6522066f666673657422086675'\
+           b'6c6c53697a65220762696e6e696e672207726576657273650008756e697175654'\
+           b'964220d6461746154696d655374616d70fd0700800674696d655f740310736563'\
+           b'6f6e64735061737445706f6368230b6e616e6f7365636f6e64732207757365725'\
+           b'461672209617474726962757465fd080088fd0900801865706963733a6e742f4e'\
+           b'544174747269627574653a312e3005046e616d65600576616c7565fe04000a646'\
+           b'57363726970746f72600a736f75726365547970652206736f7572636560'
 
+    if len(sys.argv) == 1:
+        byte = codecs.decode(desc.replace(b' ', b''), 'hex')
+        hexdump.hexdump(byte)
+        buffer = BufferReader(byte)
+        object_ = DataObject.from_buffer(buffer)
+        print(object_)
     else:
         for desc in sys.argv[1:]:
             base = 10
             if desc.startswith('0x'):
                 base = 16
-            print(DataType.from_field_desc(int(desc, base)))
+            type_ = DataType.from_field_desc(int(desc, base))
+            print(type_)
+
+            desc = type_.to_field_desc()
+
+            print(hex(desc))
