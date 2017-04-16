@@ -310,7 +310,7 @@ if __name__ == '__main__':
     import codecs
     import hexdump
     import sys
-    from messages import BufferReader
+    from .messages import BufferReader
 
     desc1 = \
     b"FD 00 01 80  0B 74 69 6D  65 53 74 61  6D 70 5F 74"\

@@ -1,7 +1,7 @@
 import socket
 import threading
 
-from messages import *
+from .messages import *
 
 def run_socket_client(addr, port):
     sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)

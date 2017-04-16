@@ -5,8 +5,8 @@ import itertools
 import enum
 import sys
 
-import constants
-from data import DataObject, DataFlag
+from . import constants
+from .data import DataObject, DataFlag
 
 if sys.hexversion < 0x03000000:
     def int_from_bytes(s, byteorder):

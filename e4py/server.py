@@ -2,8 +2,8 @@ import ipaddress
 import socket
 import threading
 
-import constants
-from messages import *
+from . import constants
+from .messages import *
 
 GUID = 0xffffffff00000000ffffffff
 
