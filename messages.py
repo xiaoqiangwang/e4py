@@ -886,7 +886,7 @@ class ClientMessageDispatcher(object):
                 response = CreateChannelResponse.from_buffer(buffer)
                 print(response)
 
-                request = ChannelGetFieldRequest(response.serverChannelID, 1, b'dimension')
+                request = ChannelGetFieldRequest(response.serverChannelID, 1, b'')
                 self.send_data(request.to_buffer())
                 self.pending = True
             elif header.messageCommand == ApplicationMessageCode.ChannelIF:
